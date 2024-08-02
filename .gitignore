@@ -1,0 +1,6 @@
+emocon.egg-info/*
+UFC101_subset/*
+*.tar
+bert-base-finetuned-meld/*
+distilled-vmae/*
+videomae-base-finetuned-meld/*
