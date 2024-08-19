@@ -1,5 +1,5 @@
 import torch
-from .video_mae import VideoMAE
+from .video_mae import VideoMAESimCLR
 
 from torch.utils.tensorboard import SummaryWriter
 import torch.nn.functional as F
@@ -62,7 +62,7 @@ class SimCLR(object):
 
         train_loader, valid_loader = self.dataset.get_data_loaders()
 
-        model = ResNetSimCLR(**self.config["model"]).to(self.device)
+        model = VideoMAESimCLR(**self.config["model"]).to(self.device)
         model = self._load_pre_trained_weights(model)
 
         optimizer = torch.optim.Adam(model.parameters(), 3e-4, weight_decay=eval(self.config['weight_decay']))
