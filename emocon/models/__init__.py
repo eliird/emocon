@@ -1,1 +1,1 @@
-from .simclr import SimCLR
+from .video_mae import VideoMAESimCLR
