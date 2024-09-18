@@ -4,3 +4,5 @@ UFC101_subset/*
 bert-base-finetuned-meld/*
 distilled-vmae/*
 videomae-base-finetuned-meld/*
+contastive-vmae/*
+ emocon/models/__pycache__/*

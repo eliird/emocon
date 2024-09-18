@@ -1,62 +1,77 @@
 import torch
 import torch.nn as nn
+from collections import namedtuple
 import torch.nn.functional as F
-import torchvision.models as models
-from .model_utils import load_mae_model
+from emocon.constants import EMOTION2LABEL, LABEL2EMOTION
+from transformers import VideoMAEForVideoClassification
 
-class Encoder(nn.Module):
-    def __init__(self, out_dim=64):
-        super(Encoder, self).__init__()
-        self.conv1 = nn.Conv2d(3, 16, kernel_size=3, stride=1, padding=1)
-        self.conv2 = nn.Conv2d(16, 32, kernel_size=3, stride=1, padding=1)
-        self.conv3 = nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1)
-        self.conv4 = nn.Conv2d(64, 64, kernel_size=3, stride=1, padding=1)
-        self.pool = nn.MaxPool2d(2, 2)
 
+class VMAESimCLR(nn.Module):
+    
+    def __init__(self, model_name, out_dim, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        model = VideoMAEForVideoClassification.from_pretrained(
+            model_name,
+            label2id=EMOTION2LABEL,
+            id2label=LABEL2EMOTION,
+            ignore_mismatched_sizes=True,  # provide this in case you're planning to fine-tune an already fine-tuned checkpoint
+        )
+        self.features = model.videomae
+        
+        num_features = model.classifier.in_features
         # projection MLP
-        self.l1 = nn.Linear(64, 64)
-        self.l2 = nn.Linear(64, out_dim)
-
-    def forward(self, x):
-        x = self.conv1(x)
-        x = F.relu(x)
-        x = self.pool(x)
-
-        x = self.conv2(x)
-        x = F.relu(x)
-        x = self.pool(x)
-
-        x = self.conv3(x)
-        x = F.relu(x)
-        x = self.pool(x)
-
-        x = self.conv4(x)
-        x = F.relu(x)
-        x = self.pool(x)
-
-        h = torch.mean(x, dim=[2, 3])
-
-        x = self.l1(h)
-        x = F.relu(x)
-        x = self.l2(x)
-
-        return h, x
-
-
-class VideoMAESimCLR(nn.Module):
-    def __init__(self, out_dim=256, model_name="MCG-NJU/videomae-base"):
-        v_mae = load_mae_model(model_name)
-        num_ftrs = v_mae.classifier.in_features
+        self.l1 = nn.Linear(num_features, num_features)
+        self.l2 = nn.Linear(num_features, out_dim)
         
-        self.features = nn.Sequential(*list(v_mae.children())[:-1])
-        self.l1 = nn.Linear(num_ftrs, num_ftrs)
-        self.l2 = nn.Linear(num_ftrs, out_dim)
+        # TODO: Decide to remove or keep it
+        self.criterion = nn.CrossEntropyLoss()
+        self.output = namedtuple("output", ["loss","embeds", "logits"])
         
-    def forward(self, x):
-        h = self.features(x)
-        h = h.squeeze()
+    def forward(self, **kwargs):
+        labels = kwargs['labels']
+        video = kwargs["pixel_values"]
+        
+        # video = video.to(self.mae.device)
+        embeds = self.features(pixel_values=video).last_hidden_state[:, 0, :]
+        embeds = embeds.squeeze()
+        
+        logits = self.l1(embeds)
+        logits = F.relu(logits)
+        logits = self.l2(logits)
+        
+        loss = self.get_loss(logits, labels, embeds)
+        
+        return  (logits, embeds, loss)# self.output(loss=loss, embeds=embeds, logits=logits)
+    
+    def get_loss(self, logits, labels, embeddings, temperature=0.5, embeddings_weight=1, logits_weight=1):
+        try:
+            num_embeddings = embeddings.size(0)
+            loss = 0.0
+            count = 0
+            # Convert embeddings to probabilities
+            softmax_embeddings = F.softmax(embeddings / temperature, dim=1)
+            
+            for i in range(num_embeddings):
+                for j in range(i + 1, num_embeddings):
+                    prob_i = softmax_embeddings[i]
+                    prob_j = softmax_embeddings[j]
+                    
+                    # Compute KL divergence
+                    kl_div_ij = F.kl_div(prob_i.log(), prob_j, reduction='batchmean')
+                    kl_div_ji = F.kl_div(prob_j.log(), prob_i, reduction='batchmean')
+                    
 
-        x = self.l1(h)
-        x = F.relu(x)
-        x = self.l2(x)
-        return h, x
+                    # Compute loss
+                    if labels[i] == labels[j]:
+                        # Same label: encourage KL divergence to be close to zero
+                        loss += kl_div_ij + kl_div_ji
+                    else:
+                        # Different labels: encourage KL divergence to be large
+                        loss -= kl_div_ij + kl_div_ji
+                    count += 1
+            loss =  loss / count if count > 0 else torch.tensor(0.0)
+            loss += logits_weight * self.criterion(logits, labels)
+            return loss
+
+        except:
+            return torch.tensor(0.0)
